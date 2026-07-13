@@ -1,0 +1,192 @@
+"""Điều khiển tiến trình FFmpeg bằng QProcess (bất đồng bộ, không chặn UI).
+
+Trách nhiệm:
+  - Sinh file concat từ playlist, dựng lệnh FFmpeg.
+  - Khởi động/giám sát tiến trình; đọc stdout (tiến trình) và stderr (log).
+  - Tự khởi động lại khi FFmpeg thoát bất thường (nếu bật auto_restart).
+  - Dọn file concat tạm khi dừng.
+"""
+from __future__ import annotations
+
+import os
+from enum import Enum
+
+from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+
+from . import playlist_manager
+from .ffmpeg_command import build_command
+from .ffmpeg_parser import ProgressParser, ProgressStats
+from .models import StreamConfig
+
+# Số lần tự khởi động lại liên tiếp tối đa trước khi bỏ cuộc.
+MAX_RESTARTS = 10
+# Thời gian chờ trước khi thử lại (ms).
+RESTART_DELAY_MS = 3000
+
+
+class StreamState(str, Enum):
+    IDLE = "idle"
+    STARTING = "starting"
+    RUNNING = "running"
+    RESTARTING = "restarting"
+    STOPPING = "stopping"
+    ERROR = "error"
+
+
+class StreamController(QObject):
+    state_changed = Signal(StreamState)
+    stats_updated = Signal(ProgressStats)
+    log_line = Signal(str)               # dòng log/thông báo cho UI
+    error = Signal(str)                  # lỗi nghiêm trọng
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._proc: QProcess | None = None
+        self._parser = ProgressParser()
+        self._stdout_buf = ""
+        self._cfg: StreamConfig | None = None
+        self._concat_file: str | None = None
+        self._state = StreamState.IDLE
+        self._user_stopping = False
+        self._restart_count = 0
+
+    # ------------------------------------------------------------------ API
+    @property
+    def state(self) -> StreamState:
+        return self._state
+
+    @property
+    def is_active(self) -> bool:
+        return self._state in (
+            StreamState.STARTING, StreamState.RUNNING, StreamState.RESTARTING,
+        )
+
+    def start(self, cfg: StreamConfig) -> None:
+        if self.is_active:
+            self.log_line.emit("Đang phát rồi, bỏ qua lệnh Start.")
+            return
+        self._cfg = cfg
+        self._restart_count = 0
+        self._user_stopping = False
+        self._launch()
+
+    def stop(self) -> None:
+        if not self.is_active and self._state != StreamState.ERROR:
+            return
+        self._user_stopping = True
+        self._set_state(StreamState.STOPPING)
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self.log_line.emit("Đang dừng luồng…")
+            # Gửi tín hiệu kết thúc; nếu không dừng sẽ kill sau timeout.
+            self._proc.terminate()
+            QTimer.singleShot(4000, self._force_kill_if_needed)
+        else:
+            self._finalize_idle()
+
+    # -------------------------------------------------------------- internal
+    def _launch(self) -> None:
+        assert self._cfg is not None
+        try:
+            self._concat_file = playlist_manager.write_concat_file(self._cfg.playlist)
+            args = build_command(self._cfg, self._concat_file)
+        except ValueError as exc:
+            self.error.emit(str(exc))
+            self._set_state(StreamState.ERROR)
+            return
+
+        program, *proc_args = args
+        self._parser = ProgressParser()
+        self._stdout_buf = ""
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.SeparateChannels)
+        proc.readyReadStandardOutput.connect(self._on_stdout)
+        proc.readyReadStandardError.connect(self._on_stderr)
+        proc.finished.connect(self._on_finished)
+        proc.errorOccurred.connect(self._on_proc_error)
+        self._proc = proc
+
+        self._set_state(StreamState.STARTING if self._restart_count == 0 else StreamState.RESTARTING)
+        n_channels = len(self._cfg.active_channels())
+        self.log_line.emit(
+            f"Khởi động FFmpeg → {n_channels} kênh, preset {self._cfg.preset_key}, "
+            f"encoder {self._cfg.encoder_key}."
+        )
+        proc.start(program, proc_args)
+
+    def _on_stdout(self) -> None:
+        if self._proc is None:
+            return
+        data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "ignore")
+        self._stdout_buf += data
+        while "\n" in self._stdout_buf:
+            line, self._stdout_buf = self._stdout_buf.split("\n", 1)
+            stats = self._parser.feed_line(line)
+            if stats is not None:
+                if self._state in (StreamState.STARTING, StreamState.RESTARTING):
+                    self._set_state(StreamState.RUNNING)
+                    self._restart_count = 0  # chạy ổn định thì reset đếm
+                self.stats_updated.emit(stats)
+
+    def _on_stderr(self) -> None:
+        if self._proc is None:
+            return
+        data = bytes(self._proc.readAllStandardError()).decode("utf-8", "ignore")
+        for line in data.splitlines():
+            line = line.strip()
+            if line:
+                self.log_line.emit(f"[ffmpeg] {line}")
+
+    def _on_proc_error(self, err: QProcess.ProcessError) -> None:
+        if err == QProcess.FailedToStart:
+            self.error.emit(
+                "Không khởi động được FFmpeg. Kiểm tra FFmpeg đã cài / có trên PATH."
+            )
+            self._set_state(StreamState.ERROR)
+            self._cleanup_concat()
+
+    def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
+        self.log_line.emit(f"FFmpeg kết thúc (mã {exit_code}).")
+        self._cleanup_concat()
+
+        if self._user_stopping:
+            self._finalize_idle()
+            return
+
+        # Thoát bất thường -> cân nhắc tự khởi động lại.
+        cfg = self._cfg
+        if cfg is not None and cfg.auto_restart and self._restart_count < MAX_RESTARTS:
+            self._restart_count += 1
+            self._set_state(StreamState.RESTARTING)
+            self.log_line.emit(
+                f"Mất luồng — thử khởi động lại lần {self._restart_count}/{MAX_RESTARTS} "
+                f"sau {RESTART_DELAY_MS // 1000}s…"
+            )
+            QTimer.singleShot(RESTART_DELAY_MS, self._launch)
+        else:
+            if cfg is not None and cfg.auto_restart:
+                self.error.emit(f"Đã thử lại {MAX_RESTARTS} lần nhưng vẫn lỗi. Dừng.")
+            self._set_state(StreamState.ERROR if not self._user_stopping else StreamState.IDLE)
+
+    def _force_kill_if_needed(self) -> None:
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self.log_line.emit("FFmpeg chưa dừng, buộc kết thúc.")
+            self._proc.kill()
+
+    def _finalize_idle(self) -> None:
+        self._cleanup_concat()
+        self._set_state(StreamState.IDLE)
+        self.log_line.emit("Đã dừng.")
+
+    def _cleanup_concat(self) -> None:
+        if self._concat_file and os.path.exists(self._concat_file):
+            try:
+                os.remove(self._concat_file)
+            except OSError:
+                pass
+        self._concat_file = None
+
+    def _set_state(self, state: StreamState) -> None:
+        if state != self._state:
+            self._state = state
+            self.state_changed.emit(state)
