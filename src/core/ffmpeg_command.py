@@ -13,6 +13,16 @@ from .ffmpeg_locator import ffmpeg_path
 from .models import YOUTUBE_RTMP_BASE, Channel, StreamConfig
 from .presets import get_preset
 
+# Tùy chọn cho fifo muxer bọc quanh mỗi output tee:
+#  - queue_size: đệm ~600 gói mỗi kênh (đủ hấp thụ giật mạng vài giây)
+#  - drop_pkts_on_overflow: nghẽn quá lâu thì bỏ gói kênh đó (không chặn kênh khác)
+#  - attempt_recovery + recover_any_error: rớt kết nối thì tự nối lại
+#  - restart_with_keyframe: nối lại bắt đầu từ keyframe để hình không vỡ
+FIFO_OPTIONS = (
+    "queue_size=600:drop_pkts_on_overflow=1:attempt_recovery=1:"
+    "recover_any_error=1:restart_with_keyframe=1"
+)
+
 
 def _video_filter(width: int, height: int, fps: int) -> str:
     """Scale giữ tỉ lệ + pad về đúng khung + ép fps + pixel format chuẩn."""
@@ -92,8 +102,16 @@ def build_command(cfg: StreamConfig, concat_file: str) -> list[str]:
     # Audio: AAC chuẩn YouTube
     args += ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"]
 
-    # Fan-out tee
-    args += ["-f", "tee", "-map", "0:v:0", "-map", "0:a:0?", _tee_target(channels)]
+    # Fan-out tee — mỗi kênh chạy trong luồng + bộ đệm riêng (use_fifo) để một
+    # kênh nghẽn mạng KHÔNG kéo các kênh khác và encoder đứng theo. Khi đầy đệm
+    # thì drop gói kênh đó; tự thử kết nối lại và bắt lại từ keyframe.
+    args += [
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-f", "tee",
+        "-use_fifo", "1",
+        "-fifo_options", FIFO_OPTIONS,
+        _tee_target(channels),
+    ]
 
     return args
 
