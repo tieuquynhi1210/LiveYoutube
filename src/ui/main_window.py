@@ -1,6 +1,8 @@
 """Cửa sổ chính của ứng dụng LiveYoutube."""
 from __future__ import annotations
 
+from datetime import datetime
+
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -42,6 +44,8 @@ class MainWindow(QMainWindow):
 
         self.controller = StreamController(self)
         self._detected_encoders: list = []
+        self._log_file = None
+        self._open_log_file()
 
         self._build_ui()
         self._connect_controller()
@@ -49,6 +53,8 @@ class MainWindow(QMainWindow):
         self._start_encoder_detection()
         self._update_bandwidth_estimate()
         self._apply_state(StreamState.IDLE)
+        if self._log_file is not None:
+            self._append_log(f"Log phiên lưu tại: {self._log_path}")
 
     # ----------------------------------------------------------------- build
     def _build_ui(self) -> None:
@@ -424,8 +430,24 @@ class MainWindow(QMainWindow):
         self._append_log(f"❌ {msg}")
         QMessageBox.critical(self, "Lỗi", msg)
 
+    def _open_log_file(self) -> None:
+        """Mở file log phiên (append) để giữ lại lịch sử khi treo/khởi động lại."""
+        try:
+            path = store.config_dir() / "session.log"
+            self._log_file = open(path, "a", encoding="utf-8")
+            self._log_path = path
+        except OSError:
+            self._log_file = None
+
     def _append_log(self, text: str) -> None:
         self.log_view.appendPlainText(text)
+        if self._log_file is not None:
+            try:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._log_file.write(f"{ts}  {text}\n")
+                self._log_file.flush()
+            except (OSError, ValueError):
+                pass
 
     def _update_bandwidth_estimate(self, *args) -> None:
         preset = get_preset(self.preset_combo.currentData())
@@ -452,4 +474,9 @@ class MainWindow(QMainWindow):
                 return
             self.controller.stop()
         self._save_config()
+        if self._log_file is not None:
+            try:
+                self._log_file.close()
+            except OSError:
+                pass
         event.accept()

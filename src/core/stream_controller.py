@@ -9,6 +9,7 @@ Trách nhiệm:
 from __future__ import annotations
 
 import os
+import time
 from enum import Enum
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
@@ -19,9 +20,13 @@ from .ffmpeg_parser import ProgressParser, ProgressStats
 from .models import StreamConfig
 
 # Số lần tự khởi động lại liên tiếp tối đa trước khi bỏ cuộc.
-MAX_RESTARTS = 10
+MAX_RESTARTS = 1000
 # Thời gian chờ trước khi thử lại (ms).
 RESTART_DELAY_MS = 3000
+# Watchdog: nếu quá ngần này giây không thấy tiến triển (FFmpeg treo) -> khởi động lại.
+STALL_TIMEOUT_SEC = 20.0
+# Chu kỳ kiểm tra treo (ms).
+WATCHDOG_INTERVAL_MS = 5000
 
 
 class StreamState(str, Enum):
@@ -49,6 +54,12 @@ class StreamController(QObject):
         self._state = StreamState.IDLE
         self._user_stopping = False
         self._restart_count = 0
+
+        # Watchdog phát hiện treo: đo lần cuối FFmpeg báo tiến triển.
+        self._last_progress_ts = 0.0
+        self._watchdog = QTimer(self)
+        self._watchdog.setInterval(WATCHDOG_INTERVAL_MS)
+        self._watchdog.timeout.connect(self._check_stall)
 
     # ------------------------------------------------------------------ API
     @property
@@ -123,6 +134,7 @@ class StreamController(QObject):
             line, self._stdout_buf = self._stdout_buf.split("\n", 1)
             stats = self._parser.feed_line(line)
             if stats is not None:
+                self._last_progress_ts = time.monotonic()  # còn nhận tiến triển = chưa treo
                 if self._state in (StreamState.STARTING, StreamState.RESTARTING):
                     self._set_state(StreamState.RUNNING)
                     self._restart_count = 0  # chạy ổn định thì reset đếm
@@ -186,7 +198,30 @@ class StreamController(QObject):
                 pass
         self._concat_file = None
 
+    def _check_stall(self) -> None:
+        """Watchdog: FFmpeg còn sống nhưng ngừng tiến triển quá lâu -> coi như treo."""
+        if self._state != StreamState.RUNNING:
+            return
+        if self._last_progress_ts <= 0:
+            return
+        idle = time.monotonic() - self._last_progress_ts
+        if idle > STALL_TIMEOUT_SEC:
+            self._watchdog.stop()
+            self.log_line.emit(
+                f"⚠ Phát hiện treo: {idle:.0f}s không có tiến triển (thường do mạng chập). "
+                f"Kill FFmpeg và khởi động lại…"
+            )
+            # kill() -> _on_finished chạy nhánh khởi động lại (vì không phải user dừng).
+            if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+                self._proc.kill()
+
     def _set_state(self, state: StreamState) -> None:
         if state != self._state:
             self._state = state
+            # Bật watchdog khi đang chạy, tắt ở mọi trạng thái khác.
+            if state == StreamState.RUNNING:
+                self._last_progress_ts = time.monotonic()
+                self._watchdog.start()
+            else:
+                self._watchdog.stop()
             self.state_changed.emit(state)
