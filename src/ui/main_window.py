@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .. import __version__
 from ..config import store
 from ..core import playlist_manager
 from ..core.encoder_detector import detect_encoders
@@ -39,7 +40,7 @@ class EncoderDetectWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("LiveYoutube — Phát video lên nhiều kênh YouTube Live")
+        self.setWindowTitle(f"LiveYoutube v{__version__} — Phát video lên nhiều kênh YouTube Live")
         self.resize(1080, 720)
 
         self.controller = StreamController(self)
@@ -53,6 +54,8 @@ class MainWindow(QMainWindow):
         self._start_encoder_detection()
         self._update_bandwidth_estimate()
         self._apply_state(StreamState.IDLE)
+        self._append_log(f"===== LiveYoutube v{__version__} khởi động =====")
+        self._append_log("Chống treo: watchdog 20s (tự khởi động lại) + tee use_fifo (mỗi kênh 1 luồng).")
         if self._log_file is not None:
             self._append_log(f"Log phiên lưu tại: {self._log_path}")
 
