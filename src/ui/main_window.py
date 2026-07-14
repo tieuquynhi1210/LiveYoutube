@@ -55,7 +55,8 @@ class MainWindow(QMainWindow):
         self._update_bandwidth_estimate()
         self._apply_state(StreamState.IDLE)
         self._append_log(f"===== LiveYoutube v{__version__} khởi động =====")
-        self._append_log("Chống treo: watchdog 20s (tự khởi động lại) + tee use_fifo (mỗi kênh 1 luồng).")
+        self._append_log("Chống treo: watchdog 20s (tự khởi động lại, phát tiếp từ chỗ dừng) "
+                         "+ tee use_fifo (mỗi kênh 1 luồng).")
         if self._log_file is not None:
             self._append_log(f"Log phiên lưu tại: {self._log_path}")
 

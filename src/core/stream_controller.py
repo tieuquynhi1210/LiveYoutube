@@ -9,6 +9,7 @@ Trách nhiệm:
 from __future__ import annotations
 
 import os
+import threading
 import time
 from enum import Enum
 
@@ -61,6 +62,12 @@ class StreamController(QObject):
         self._watchdog.setInterval(WATCHDOG_INTERVAL_MS)
         self._watchdog.timeout.connect(self._check_stall)
 
+        # Phát tiếp từ chỗ dừng: vị trí tua cho lần phát kế (giây) + thời gian
+        # phát của tiến trình hiện tại + tổng thời lượng playlist (để tính vòng lặp).
+        self._resume_offset = 0.0
+        self._last_out_time = 0.0
+        self._total_duration = 0.0
+
     # ------------------------------------------------------------------ API
     @property
     def state(self) -> StreamState:
@@ -79,7 +86,23 @@ class StreamController(QObject):
         self._cfg = cfg
         self._restart_count = 0
         self._user_stopping = False
+        # Phát mới từ đầu.
+        self._resume_offset = 0.0
+        self._last_out_time = 0.0
+        self._total_duration = 0.0
+        self._compute_total_duration_async(cfg.playlist)
         self._launch()
+
+    def _compute_total_duration_async(self, playlist: list[str]) -> None:
+        """Tính tổng thời lượng playlist ở luồng nền (để xử lý tua khi lặp vòng)."""
+        def worker(paths: list[str]) -> None:
+            total = 0.0
+            for p in paths:
+                info = playlist_manager.probe(p)
+                if info.duration_sec:
+                    total += info.duration_sec
+            self._total_duration = total  # gán float: đọc phía main thread là an toàn
+        threading.Thread(target=worker, args=(list(playlist),), daemon=True).start()
 
     def stop(self) -> None:
         if not self.is_active and self._state != StreamState.ERROR:
@@ -99,11 +122,15 @@ class StreamController(QObject):
         assert self._cfg is not None
         try:
             self._concat_file = playlist_manager.write_concat_file(self._cfg.playlist)
-            args = build_command(self._cfg, self._concat_file)
+            args = build_command(self._cfg, self._concat_file, self._resume_offset)
         except ValueError as exc:
             self.error.emit(str(exc))
             self._set_state(StreamState.ERROR)
             return
+
+        if self._resume_offset > 0.5:
+            m, s = divmod(int(self._resume_offset), 60)
+            self.log_line.emit(f"Phát tiếp từ vị trí {m:02d}:{s:02d} trong playlist.")
 
         program, *proc_args = args
         self._parser = ProgressParser()
@@ -135,6 +162,7 @@ class StreamController(QObject):
             stats = self._parser.feed_line(line)
             if stats is not None:
                 self._last_progress_ts = time.monotonic()  # còn nhận tiến triển = chưa treo
+                self._last_out_time = stats.out_time_sec    # vị trí phát của tiến trình này
                 if self._state in (StreamState.STARTING, StreamState.RESTARTING):
                     self._set_state(StreamState.RUNNING)
                     self._restart_count = 0  # chạy ổn định thì reset đếm
@@ -169,6 +197,7 @@ class StreamController(QObject):
         cfg = self._cfg
         if cfg is not None and cfg.auto_restart and self._restart_count < MAX_RESTARTS:
             self._restart_count += 1
+            self._update_resume_offset(cfg)
             self._set_state(StreamState.RESTARTING)
             self.log_line.emit(
                 f"Mất luồng — thử khởi động lại lần {self._restart_count}/{MAX_RESTARTS} "
@@ -179,6 +208,24 @@ class StreamController(QObject):
             if cfg is not None and cfg.auto_restart:
                 self.error.emit(f"Đã thử lại {MAX_RESTARTS} lần nhưng vẫn lỗi. Dừng.")
             self._set_state(StreamState.ERROR if not self._user_stopping else StreamState.IDLE)
+
+    def _update_resume_offset(self, cfg: StreamConfig) -> None:
+        """Tính vị trí tua cho lần phát lại = chỗ vừa phát dở.
+
+        Vị trí tuyệt đối = điểm tiến trình vừa rồi bắt đầu + thời gian nó đã phát.
+        Nếu playlist lặp thì lấy phần dư theo tổng thời lượng để không tua quá đầu ra.
+        Chưa biết tổng thời lượng (probe chưa xong) -> an toàn phát lại từ đầu.
+        """
+        absolute = self._resume_offset + self._last_out_time
+        total = self._total_duration
+        if total > 1.0 and cfg.loop:
+            offset = absolute % total
+        elif total > 1.0:
+            offset = absolute if absolute < total else 0.0
+        else:
+            offset = 0.0
+        self._resume_offset = max(0.0, offset)
+        self._last_out_time = 0.0
 
     def _force_kill_if_needed(self) -> None:
         if self._proc is not None and self._proc.state() != QProcess.NotRunning:

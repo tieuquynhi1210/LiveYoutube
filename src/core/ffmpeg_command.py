@@ -64,8 +64,13 @@ def _tee_target(channels: list[Channel], base: str = YOUTUBE_RTMP_BASE) -> str:
     return "|".join(parts)
 
 
-def build_command(cfg: StreamConfig, concat_file: str) -> list[str]:
-    """Dựng đầy đủ tham số FFmpeg. Ném ValueError nếu cấu hình không hợp lệ."""
+def build_command(cfg: StreamConfig, concat_file: str,
+                  resume_offset: float = 0.0) -> list[str]:
+    """Dựng đầy đủ tham số FFmpeg. Ném ValueError nếu cấu hình không hợp lệ.
+
+    resume_offset > 0: tua vào playlist ngần này giây (dùng khi khởi động lại
+    sau treo để phát tiếp từ chỗ dừng thay vì phát từ đầu).
+    """
     channels = cfg.active_channels()
     if not channels:
         raise ValueError("Chưa có kênh hợp lệ nào (thiếu stream key).")
@@ -88,6 +93,11 @@ def build_command(cfg: StreamConfig, concat_file: str) -> list[str]:
 
     if cfg.loop:
         args += ["-stream_loop", "-1"]   # lặp toàn bộ playlist vô hạn
+
+    # Tua tới vị trí phát dở (seek đầu vào, trước -i). Chỉ áp cho lần phát đầu;
+    # các vòng lặp sau vẫn chạy từ đầu playlist như bình thường.
+    if resume_offset > 0.5:
+        args += ["-ss", f"{resume_offset:.3f}"]
 
     # Đầu vào: concat demuxer
     args += [
