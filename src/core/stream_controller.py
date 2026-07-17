@@ -193,17 +193,33 @@ class StreamController(QObject):
             self._finalize_idle()
             return
 
-        # Thoát bất thường -> cân nhắc tự khởi động lại.
         cfg = self._cfg
+        clean_end = (exit_status == QProcess.NormalExit and exit_code == 0)
+
+        # Hết playlist bình thường mà KHÔNG bật lặp -> dừng hẳn.
+        if clean_end and cfg is not None and not cfg.loop:
+            self.log_line.emit("Đã phát hết playlist.")
+            self._finalize_idle()
+            return
+
+        # Còn lại: hết playlist khi đang lặp (nhiều clip), hoặc mất luồng/treo.
         if cfg is not None and cfg.auto_restart and self._restart_count < MAX_RESTARTS:
             self._restart_count += 1
-            self._update_resume_offset(cfg)
-            self._set_state(StreamState.RESTARTING)
-            self.log_line.emit(
-                f"Mất luồng — thử khởi động lại lần {self._restart_count}/{MAX_RESTARTS} "
-                f"sau {RESTART_DELAY_MS // 1000}s…"
-            )
-            QTimer.singleShot(RESTART_DELAY_MS, self._launch)
+            if clean_end and cfg.loop:
+                # Lặp lại từ đầu playlist, gần như không có khoảng trống.
+                self._resume_offset = 0.0
+                self._last_out_time = 0.0
+                self._set_state(StreamState.RESTARTING)
+                self.log_line.emit("Hết playlist — lặp lại từ đầu…")
+                QTimer.singleShot(300, self._launch)
+            else:
+                self._update_resume_offset(cfg)
+                self._set_state(StreamState.RESTARTING)
+                self.log_line.emit(
+                    f"Mất luồng — thử khởi động lại lần {self._restart_count}/{MAX_RESTARTS} "
+                    f"sau {RESTART_DELAY_MS // 1000}s…"
+                )
+                QTimer.singleShot(RESTART_DELAY_MS, self._launch)
         else:
             if cfg is not None and cfg.auto_restart:
                 self.error.emit(f"Đã thử lại {MAX_RESTARTS} lần nhưng vẫn lỗi. Dừng.")
