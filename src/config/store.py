@@ -54,14 +54,16 @@ def load() -> StreamConfig:
     except (json.JSONDecodeError, OSError):
         return StreamConfig()
 
-    channels = [
-        Channel(
+    channels = []
+    for c in data.get("channels", []):
+        ch = Channel(
             name=c.get("name", ""),
             stream_key=c.get("stream_key", ""),
             enabled=c.get("enabled", True),
         )
-        for c in data.get("channels", [])
-    ]
+        if c.get("id"):
+            ch.id = c["id"]
+        channels.append(ch)
     return StreamConfig(
         playlist=list(data.get("playlist", [])),
         channels=channels,

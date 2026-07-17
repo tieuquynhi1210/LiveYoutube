@@ -4,7 +4,14 @@ Phần mềm phát **file video / playlist** lên **nhiều kênh YouTube Live c
 
 ## Nguyên lý
 
-Đọc playlist → chuẩn hóa kích thước/fps → **encode một lần** bằng GPU (NVENC/QSV/AMF) hoặc CPU → muxer `tee` của FFmpeg **fan-out ra nhiều địa chỉ RTMP** (mỗi kênh một stream key). Vì chỉ encode một lần, thêm kênh gần như không tốn thêm GPU — giới hạn thật là **băng thông upload** (≈ số kênh × bitrate).
+Kiến trúc **1 encoder + nhiều relay**:
+
+- **Encoder**: đọc playlist → chuẩn hóa kích thước/fps → **encode một lần** bằng GPU (NVENC/QSV/AMF) hoặc CPU → xuất **HLS nội bộ** (thư mục tạm).
+- **Relay** (mỗi kênh một tiến trình): đọc HLS đó, **copy (không encode lại)** rồi đẩy RTMP lên kênh YouTube tương ứng.
+
+Nhờ tách tiến trình, có thể **thêm / xoá / tạm dừng / phát tiếp từng kênh ngay khi đang live** mà không ảnh hưởng kênh khác; mỗi kênh (và encoder) có watchdog tự nối lại khi rớt. Vì chỉ encode một lần, thêm kênh gần như không tốn thêm GPU — giới hạn thật là **băng thông upload** (≈ số kênh × bitrate). Đổi lại HLS thêm độ trễ ~5–10 giây.
+
+Xử lý playlist: **1 clip** dùng concat demuxer (lặp mượt, tua tiếp được); **nhiều clip** dùng concat *filter* (giải mã từng clip đúng codec) để không bị màn hình đen ở điểm chuyển khi các clip khác codec (H.264/HEVC…).
 
 ## Yêu cầu
 

@@ -1,6 +1,7 @@
 """Các kiểu dữ liệu cấu hình dùng chung."""
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 
 # Endpoint ingest RTMP mặc định của YouTube Live.
@@ -15,6 +16,7 @@ class Channel:
     name: str
     stream_key: str
     enabled: bool = True
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def rtmp_url(self, base: str = YOUTUBE_RTMP_BASE) -> str:
         key = self.stream_key.strip()

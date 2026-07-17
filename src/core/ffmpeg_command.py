@@ -70,41 +70,71 @@ def _tee_target(channels: list[Channel], base: str = YOUTUBE_RTMP_BASE) -> str:
     return "|".join(parts)
 
 
-def _tee_output_args(cfg: StreamConfig, channels: list[Channel],
-                     maps: list[str]) -> list[str]:
-    """Phần đuôi chung: encoder video + audio AAC + fan-out tee (use_fifo)."""
+def _encode_args(cfg: StreamConfig) -> list[str]:
+    """Tham số encode video + audio (không kèm output)."""
     preset = get_preset(cfg.preset_key)
     bitrate = cfg.bitrate_override_kbps or preset.video_bitrate_kbps
-
-    args: list[str] = list(maps)
-    args += _video_encoder_args(cfg.encoder_key, bitrate, bitrate, bitrate * 2, preset.gop)
+    args = _video_encoder_args(cfg.encoder_key, bitrate, bitrate, bitrate * 2, preset.gop)
     args += ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"]
-    args += [
-        "-f", "tee",
-        "-use_fifo", "1",
-        "-fifo_options", FIFO_OPTIONS,
-        _tee_target(channels),
-    ]
     return args
 
 
-def build_command(cfg: StreamConfig, concat_file: str,
-                  resume_offset: float = 0.0) -> list[str]:
-    """Dựng đầy đủ tham số FFmpeg. Ném ValueError nếu cấu hình không hợp lệ."""
-    channels = cfg.active_channels()
-    if not channels:
-        raise ValueError("Chưa có kênh hợp lệ nào (thiếu stream key).")
+def _hls_output_args(hls_dir: str) -> list[str]:
+    """Xuất HLS rolling nội bộ (encoder ghi, các relay đọc chung)."""
+    seg = f"{hls_dir}/seg_%05d.ts"
+    m3u8 = f"{hls_dir}/stream.m3u8"
+    return [
+        "-f", "hls",
+        "-hls_time", "2",
+        "-hls_list_size", "6",
+        "-hls_flags", "delete_segments+append_list+independent_segments+omit_endlist",
+        "-hls_segment_type", "mpegts",
+        "-hls_segment_filename", seg,
+        m3u8,
+    ]
+
+
+def build_encoder_command(cfg: StreamConfig, concat_file: str, hls_dir: str,
+                          resume_offset: float = 0.0) -> list[str]:
+    """Encoder: đọc playlist -> encode MỘT LẦN -> xuất HLS nội bộ trong hls_dir.
+
+    - 1 clip: concat demuxer + -stream_loop (lặp mượt) + -ss (tua resume).
+    - nhiều clip: concat FILTER (giải mã từng clip đúng codec, chống đen ở
+      điểm chuyển). Lặp toàn playlist do lớp tự-khởi-động-lại đảm nhiệm.
+    """
     if not cfg.playlist:
         raise ValueError("Playlist rỗng.")
 
     if len(cfg.playlist) >= 2:
-        return _build_filter_command(cfg, channels)
-    return _build_demuxer_command(cfg, concat_file, channels, resume_offset)
+        args = _encoder_input_filter(cfg)
+        maps = ["-map", "[vout]", "-map", "[aout]"]
+    else:
+        args = _encoder_input_demuxer(cfg, concat_file, resume_offset)
+        maps = ["-map", "0:v:0", "-map", "0:a:0?"]
+
+    args += maps
+    args += _encode_args(cfg)
+    args += _hls_output_args(hls_dir)
+    return args
 
 
-def _build_demuxer_command(cfg: StreamConfig, concat_file: str,
-                           channels: list[Channel], resume_offset: float) -> list[str]:
-    """Nhánh 1 clip: concat demuxer, lặp bằng -stream_loop, tua bằng -ss."""
+def build_relay_command(channel: Channel, m3u8_path: str) -> list[str]:
+    """Relay: đọc HLS nội bộ, COPY (không encode lại) -> đẩy RTMP lên 1 kênh.
+
+    Không dùng -re: HLS live tự pace theo tốc độ segment ra.
+    """
+    return [
+        ffmpeg_path(), "-hide_banner", "-loglevel", "warning",
+        "-progress", "pipe:1", "-nostats",
+        "-i", m3u8_path,
+        "-c", "copy",
+        "-f", "flv", channel.rtmp_url(),
+    ]
+
+
+def _encoder_input_demuxer(cfg: StreamConfig, concat_file: str,
+                           resume_offset: float) -> list[str]:
+    """Nhánh 1 clip: concat demuxer + chuẩn hóa (input tới hết -vf)."""
     preset = get_preset(cfg.preset_key)
     args: list[str] = [
         ffmpeg_path(), "-hide_banner", "-loglevel", "warning",
@@ -116,15 +146,13 @@ def _build_demuxer_command(cfg: StreamConfig, concat_file: str,
         args += ["-ss", f"{resume_offset:.3f}"]
     args += ["-fflags", "+genpts", "-f", "concat", "-safe", "0", "-i", concat_file]
     args += ["-vf", _video_filter(preset.width, preset.height, preset.fps)]
-    args += _tee_output_args(cfg, channels, ["-map", "0:v:0", "-map", "0:a:0?"])
     return args
 
 
-def _build_filter_command(cfg: StreamConfig, channels: list[Channel]) -> list[str]:
+def _encoder_input_filter(cfg: StreamConfig) -> list[str]:
     """Nhánh nhiều clip: concat filter — mỗi clip giải mã riêng rồi ghép.
 
-    Clip thiếu tiếng được cấp nguồn im lặng (anullsrc) đúng thời lượng, để
-    concat filter (yêu cầu mọi đoạn có cả video lẫn audio) không lỗi.
+    Clip thiếu tiếng được cấp nguồn im lặng (anullsrc) đúng thời lượng.
     """
     from . import playlist_manager  # tránh import vòng ở cấp module
 
@@ -137,11 +165,9 @@ def _build_filter_command(cfg: StreamConfig, channels: list[Channel]) -> list[st
         ffmpeg_path(), "-hide_banner", "-loglevel", "warning",
         "-progress", "pipe:1", "-nostats",
     ]
-    # Đầu vào các file thật (index 0..N-1), mỗi cái đọc theo tốc độ thật.
     for p in paths:
         args += ["-re", "-i", p]
 
-    # Nguồn im lặng cho clip thiếu tiếng (index N trở đi).
     silent_input_of: dict[int, int] = {}
     next_index = len(paths)
     for i, info in enumerate(infos):
@@ -151,7 +177,6 @@ def _build_filter_command(cfg: StreamConfig, channels: list[Channel]) -> list[st
             silent_input_of[i] = next_index
             next_index += 1
 
-    # filter_complex: chuẩn hóa từng clip rồi concat.
     parts: list[str] = []
     concat_in = ""
     for i, info in enumerate(infos):
@@ -165,20 +190,4 @@ def _build_filter_command(cfg: StreamConfig, channels: list[Channel]) -> list[st
     parts.append(f"{concat_in}concat=n={len(paths)}:v=1:a=1[vout][aout]")
 
     args += ["-filter_complex", ";".join(parts)]
-    args += _tee_output_args(cfg, channels, ["-map", "[vout]", "-map", "[aout]"])
     return args
-
-
-def command_preview(cfg: StreamConfig, concat_file: str = "playlist.txt") -> str:
-    """Chuỗi lệnh dễ đọc để hiển thị/nhật ký (che bớt stream key)."""
-    import re
-    try:
-        args = build_command(cfg, concat_file)
-    except ValueError as exc:
-        return f"(không dựng được lệnh: {exc})"
-    shown = []
-    for a in args:
-        if "rtmp://" in a:
-            a = re.sub(r"(live2/)[^|\]\s]+", r"\1********", a)
-        shown.append(f'"{a}"' if " " in a else a)
-    return " ".join(shown)
