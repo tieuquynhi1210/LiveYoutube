@@ -4,12 +4,11 @@ Phần mềm phát **file video / playlist** lên **nhiều kênh YouTube Live c
 
 ## Nguyên lý
 
-Kiến trúc **1 encoder + nhiều relay**:
+Kiến trúc **mỗi kênh một tiến trình encode độc lập**:
 
-- **Encoder**: đọc playlist → chuẩn hóa kích thước/fps → **encode một lần** bằng GPU (NVENC/QSV/AMF) hoặc CPU → xuất **HLS nội bộ** (thư mục tạm).
-- **Relay** (mỗi kênh một tiến trình): đọc HLS đó, **copy (không encode lại)** rồi đẩy RTMP lên kênh YouTube tương ứng.
+- Mỗi kênh: đọc playlist → chuẩn hóa kích thước/fps → **encode** bằng GPU (NVENC/QSV/AMF) hoặc CPU → đẩy **thẳng RTMP** lên kênh YouTube tương ứng (`-f flv`).
 
-Nhờ tách tiến trình, có thể **thêm / xoá / tạm dừng / phát tiếp từng kênh ngay khi đang live** mà không ảnh hưởng kênh khác; mỗi kênh (và encoder) có watchdog tự nối lại khi rớt. Vì chỉ encode một lần, thêm kênh gần như không tốn thêm GPU — giới hạn thật là **băng thông upload** (≈ số kênh × bitrate). Đổi lại HLS thêm độ trễ ~5–10 giây.
+Nhờ tách tiến trình, có thể **thêm / xoá / tạm dừng / phát tiếp từng kênh ngay khi đang live** mà không ảnh hưởng kênh khác; mỗi kênh có watchdog tự nối lại khi rớt, tự lặp playlist, và (playlist 1 clip) tự phát tiếp từ chỗ dừng. Encode thẳng RTMP nên **YouTube nhận chắc chắn, độ trễ thấp**. Đổi lại mỗi kênh encode riêng nên **tốn GPU theo số kênh** (RTX 5060 kham tốt vài kênh 1080p/1440p; 4K thì ít kênh hơn). Giới hạn còn lại là **băng thông upload** (≈ số kênh × bitrate) và số phiên NVENC (~8 trên GeForce).
 
 Xử lý playlist: **1 clip** dùng concat demuxer (lặp mượt, tua tiếp được); **nhiều clip** dùng concat *filter* (giải mã từng clip đúng codec) để không bị màn hình đen ở điểm chuyển khi các clip khác codec (H.264/HEVC…).
 

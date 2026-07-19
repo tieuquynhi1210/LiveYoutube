@@ -79,28 +79,16 @@ def _encode_args(cfg: StreamConfig) -> list[str]:
     return args
 
 
-def _hls_output_args(hls_dir: str) -> list[str]:
-    """Xuất HLS rolling nội bộ (encoder ghi, các relay đọc chung)."""
-    seg = f"{hls_dir}/seg_%05d.ts"
-    m3u8 = f"{hls_dir}/stream.m3u8"
-    return [
-        "-f", "hls",
-        "-hls_time", "2",
-        "-hls_list_size", "6",
-        "-hls_flags", "delete_segments+append_list+independent_segments+omit_endlist",
-        "-hls_segment_type", "mpegts",
-        "-hls_segment_filename", seg,
-        m3u8,
-    ]
-
-
-def build_encoder_command(cfg: StreamConfig, concat_file: str, hls_dir: str,
+def build_channel_command(cfg: StreamConfig, concat_file: str, channel: Channel,
                           resume_offset: float = 0.0) -> list[str]:
-    """Encoder: đọc playlist -> encode MỘT LẦN -> xuất HLS nội bộ trong hls_dir.
+    """Một kênh = đọc playlist -> encode -> đẩy THẲNG RTMP lên kênh đó.
+
+    Mỗi kênh là một tiến trình độc lập (encode riêng), giống cách đã chạy lên
+    YouTube được ở bản đầu — nên YouTube nhận chắc chắn, độ trễ thấp.
 
     - 1 clip: concat demuxer + -stream_loop (lặp mượt) + -ss (tua resume).
     - nhiều clip: concat FILTER (giải mã từng clip đúng codec, chống đen ở
-      điểm chuyển). Lặp toàn playlist do lớp tự-khởi-động-lại đảm nhiệm.
+      điểm chuyển) + pace bằng realtime. Lặp toàn playlist do lớp tự-khởi-động-lại.
     """
     if not cfg.playlist:
         raise ValueError("Playlist rỗng.")
@@ -114,22 +102,8 @@ def build_encoder_command(cfg: StreamConfig, concat_file: str, hls_dir: str,
 
     args += maps
     args += _encode_args(cfg)
-    args += _hls_output_args(hls_dir)
+    args += ["-f", "flv", channel.rtmp_url()]
     return args
-
-
-def build_relay_command(channel: Channel, m3u8_path: str) -> list[str]:
-    """Relay: đọc HLS nội bộ, COPY (không encode lại) -> đẩy RTMP lên 1 kênh.
-
-    Không dùng -re: HLS live tự pace theo tốc độ segment ra.
-    """
-    return [
-        ffmpeg_path(), "-hide_banner", "-loglevel", "warning",
-        "-progress", "pipe:1", "-nostats",
-        "-i", m3u8_path,
-        "-c", "copy",
-        "-f", "flv", channel.rtmp_url(),
-    ]
 
 
 def _encoder_input_demuxer(cfg: StreamConfig, concat_file: str,

@@ -81,8 +81,8 @@ class MainWindow(QMainWindow):
         self._update_bandwidth_estimate()
         self._apply_state(StreamState.IDLE)
         self._append_log(f"===== LiveYoutube v{__version__} khởi động =====")
-        self._append_log("Đa kênh: 1 encoder + relay riêng mỗi kênh → thêm/xoá/tạm dừng/phát "
-                         "tiếp từng kênh khi đang live.")
+        self._append_log("Đa kênh: mỗi kênh encode & đẩy RTMP độc lập → thêm/xoá/tạm dừng/phát "
+                         "tiếp từng kênh khi đang live; một kênh lỗi không ảnh hưởng kênh khác.")
         if self._log_file is not None:
             self._append_log(f"Log phiên lưu tại: {self._log_path}")
 
