@@ -90,11 +90,12 @@ def build_channel_command(cfg: StreamConfig, concat_file: str, channel: Channel,
     - nhiều clip: concat FILTER (giải mã từng clip đúng codec, chống đen ở
       điểm chuyển) + pace bằng realtime. Lặp toàn playlist do lớp tự-khởi-động-lại.
     """
-    if not cfg.playlist:
-        raise ValueError("Playlist rỗng.")
+    playlist = channel.playlist or cfg.playlist
+    if not playlist:
+        raise ValueError("Luồng chưa có video nào.")
 
-    if len(cfg.playlist) >= 2:
-        args = _encoder_input_filter(cfg)
+    if len(playlist) >= 2:
+        args = _encoder_input_filter(cfg, playlist)
         maps = ["-map", "[vout]", "-map", "[aout]"]
     else:
         args = _encoder_input_demuxer(cfg, concat_file, resume_offset)
@@ -123,7 +124,7 @@ def _encoder_input_demuxer(cfg: StreamConfig, concat_file: str,
     return args
 
 
-def _encoder_input_filter(cfg: StreamConfig) -> list[str]:
+def _encoder_input_filter(cfg: StreamConfig, playlist: list[str]) -> list[str]:
     """Nhánh nhiều clip: concat filter — mỗi clip giải mã riêng rồi ghép.
 
     Clip thiếu tiếng được cấp nguồn im lặng (anullsrc) đúng thời lượng.
@@ -131,7 +132,7 @@ def _encoder_input_filter(cfg: StreamConfig) -> list[str]:
     from . import playlist_manager  # tránh import vòng ở cấp module
 
     preset = get_preset(cfg.preset_key)
-    paths = cfg.playlist
+    paths = playlist
     infos = [playlist_manager.probe(p) for p in paths]
     vf = _video_filter(preset.width, preset.height, preset.fps)
 

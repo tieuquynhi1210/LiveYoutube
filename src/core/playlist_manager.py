@@ -100,6 +100,15 @@ def probe(path: str) -> MediaInfo:
     return info
 
 
+def probe_durations(paths: list[str]) -> tuple[list[float], float]:
+    """Trả về (thời lượng từng clip giây, tổng thời lượng). Clip lỗi tính 0."""
+    durations = []
+    for p in paths:
+        info = probe(p)
+        durations.append(info.duration_sec or 0.0)
+    return durations, sum(durations)
+
+
 def _parse_fps(rate: str | None) -> float | None:
     if not rate or rate == "0/0":
         return None

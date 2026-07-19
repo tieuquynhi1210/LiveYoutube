@@ -54,6 +54,7 @@ def load() -> StreamConfig:
     except (json.JSONDecodeError, OSError):
         return StreamConfig()
 
+    legacy_playlist = list(data.get("playlist", []))  # cấu hình cũ: playlist chung
     channels = []
     for c in data.get("channels", []):
         ch = Channel(
@@ -63,6 +64,8 @@ def load() -> StreamConfig:
         )
         if c.get("id"):
             ch.id = c["id"]
+        # Playlist riêng của luồng; nếu chưa có (config cũ) thì kế thừa playlist chung.
+        ch.playlist = list(c.get("playlist", []) or legacy_playlist)
         channels.append(ch)
     return StreamConfig(
         playlist=list(data.get("playlist", [])),

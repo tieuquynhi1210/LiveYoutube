@@ -12,11 +12,12 @@ YOUTUBE_RTMP_BACKUP = "rtmp://b.rtmp.youtube.com/live2?backup=1"
 
 @dataclass
 class Channel:
-    """Một kênh YouTube đích = tên gợi nhớ + stream key."""
+    """Một luồng live = tên + stream key + playlist RIÊNG của luồng đó."""
     name: str
     stream_key: str
     enabled: bool = True
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    playlist: list[str] = field(default_factory=list)
 
     def rtmp_url(self, base: str = YOUTUBE_RTMP_BASE) -> str:
         key = self.stream_key.strip()
