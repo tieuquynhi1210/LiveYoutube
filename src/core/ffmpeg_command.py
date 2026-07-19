@@ -80,7 +80,7 @@ def _encode_args(cfg: StreamConfig) -> list[str]:
 
 
 def build_channel_command(cfg: StreamConfig, concat_file: str, channel: Channel,
-                          resume_offset: float = 0.0) -> list[str]:
+                          resume_offset: float = 0.0, use_backup: bool = False) -> list[str]:
     """Một kênh = đọc playlist -> encode -> đẩy THẲNG RTMP lên kênh đó.
 
     Mỗi kênh là một tiến trình độc lập (encode riêng), giống cách đã chạy lên
@@ -103,7 +103,7 @@ def build_channel_command(cfg: StreamConfig, concat_file: str, channel: Channel,
 
     args += maps
     args += _encode_args(cfg)
-    args += ["-f", "flv", channel.rtmp_url()]
+    args += ["-f", "flv", channel.rtmp_url_for(use_backup)]
     return args
 
 

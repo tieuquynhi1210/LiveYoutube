@@ -35,6 +35,12 @@ class ProgressStats:
         s = int(self.out_time_sec)
         return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
+    @property
+    def drop_rate(self) -> float:
+        """Tỉ lệ frame rớt (%) trên tổng số frame đã xử lý."""
+        total = self.frame + self.dropped_frames
+        return (self.dropped_frames / total * 100.0) if total > 0 else 0.0
+
 
 class ProgressParser:
     """Nạp từng dòng, phát ProgressStats mỗi khi một block hoàn tất."""

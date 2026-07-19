@@ -4,10 +4,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 
-# Endpoint ingest RTMP mặc định của YouTube Live.
+# Endpoint ingest RTMP của YouTube Live: chính (a) và dự phòng (b).
 YOUTUBE_RTMP_BASE = "rtmp://a.rtmp.youtube.com/live2"
-# Endpoint dự phòng (backup) của YouTube.
-YOUTUBE_RTMP_BACKUP = "rtmp://b.rtmp.youtube.com/live2?backup=1"
+YOUTUBE_RTMP_BACKUP = "rtmp://b.rtmp.youtube.com/live2"
 
 
 @dataclass
@@ -18,10 +17,20 @@ class Channel:
     enabled: bool = True
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     playlist: list[str] = field(default_factory=list)
+    ingest: str = "primary"          # 'primary' (a) | 'backup' (b) — ingest ưu tiên
 
     def rtmp_url(self, base: str = YOUTUBE_RTMP_BASE) -> str:
         key = self.stream_key.strip()
         return f"{base}/{key}"
+
+    def rtmp_url_for(self, use_backup: bool) -> str:
+        """URL theo ingest chính/dự phòng (dùng khi tự chuyển lúc lag)."""
+        base = YOUTUBE_RTMP_BACKUP if use_backup else YOUTUBE_RTMP_BASE
+        return f"{base}/{self.stream_key.strip()}"
+
+    @property
+    def prefers_backup(self) -> bool:
+        return self.ingest == "backup"
 
     @property
     def is_valid(self) -> bool:

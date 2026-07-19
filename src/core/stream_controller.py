@@ -77,6 +77,7 @@ class _ChannelStream(QObject):
         self._last_progress_ts = 0.0
         self._resume_offset = 0.0
         self._last_out_time = 0.0
+        self._use_backup = channel.prefers_backup   # ingest đang dùng (tự chuyển khi lag)
 
         self._watchdog = QTimer(self)
         self._watchdog.setInterval(WATCHDOG_INTERVAL_MS)
@@ -97,6 +98,10 @@ class _ChannelStream(QObject):
     def is_active(self) -> bool:
         return self._state in ACTIVE_STATES
 
+    @property
+    def active_ingest(self) -> str:
+        return "backup" if self._use_backup else "primary"
+
     def set_channel(self, channel: Channel) -> None:
         self._channel = channel
 
@@ -109,6 +114,7 @@ class _ChannelStream(QObject):
         self._restart_count = 0
         self._resume_offset = 0.0
         self._last_out_time = 0.0
+        self._use_backup = self._channel.prefers_backup
         self._prepare_sources()
         self._spawn()
         self._progress_timer.start()
@@ -158,7 +164,8 @@ class _ChannelStream(QObject):
             return
         try:
             args = build_channel_command(self._settings, self._concat_file or "",
-                                         self._channel, self._resume_offset)
+                                         self._channel, self._resume_offset,
+                                         use_backup=self._use_backup)
         except ValueError as exc:
             self._set_state(RelayState.ERROR, str(exc))
             return
@@ -171,11 +178,12 @@ class _ChannelStream(QObject):
         proc.readyReadStandardError.connect(self._on_stderr)
         proc.finished.connect(self._on_finished)
         self._proc = proc
-        msg = ""
+        ingest = "dự phòng" if self._use_backup else "chính"
+        parts = [f"ingest {ingest}"]
         if self._resume_offset > 0.5:
             m, s = divmod(int(self._resume_offset), 60)
-            msg = f"phát tiếp từ {m:02d}:{s:02d}"
-        self._set_state(RelayState.STARTING, msg)
+            parts.append(f"phát tiếp từ {m:02d}:{s:02d}")
+        self._set_state(RelayState.STARTING, ", ".join(parts))
         self._last_progress_ts = time.monotonic()
         self._watchdog.start()
         proc.start(program, proc_args)
@@ -201,8 +209,12 @@ class _ChannelStream(QObject):
         data = bytes(self._proc.readAllStandardError()).decode("utf-8", "ignore")
         for line in data.splitlines():
             line = line.strip()
-            if line:
-                self.log.emit(f"[{self._channel.name or 'luồng'}] {line}")
+            if not line:
+                continue
+            # Lọc cảnh báo nhiễu vô hại (spam khi lag/lặp): realtime resync, đọc trễ.
+            if "time discontinuity detected" in line or "Resumed reading at pts" in line:
+                continue
+            self.log.emit(f"[{self._channel.name or 'luồng'}] {line}")
 
     def _on_finished(self, code: int, status: QProcess.ExitStatus) -> None:
         self._watchdog.stop()
@@ -231,8 +243,14 @@ class _ChannelStream(QObject):
             QTimer.singleShot(300, self._spawn_if_run)
         else:
             self._update_resume_offset()
-            self._set_state(RelayState.RECONNECTING,
-                            f"nối lại lần {self._restart_count} sau {RESTART_DELAY_MS // 1000}s")
+            # Lag/rớt -> chuyển sang ingest còn lại (chính <-> dự phòng) khi nối lại.
+            self._use_backup = not self._use_backup
+            which = "dự phòng (b)" if self._use_backup else "chính (a)"
+            self._set_state(
+                RelayState.RECONNECTING,
+                f"lag/rớt → chuyển ingest {which}, nối lại lần {self._restart_count} "
+                f"sau {RESTART_DELAY_MS // 1000}s",
+            )
             QTimer.singleShot(RESTART_DELAY_MS, self._spawn_if_run)
 
     def _spawn_if_run(self) -> None:
@@ -331,6 +349,10 @@ class StreamController(QObject):
     def is_channel_active(self, channel_id: str) -> bool:
         s = self._streams.get(channel_id)
         return s.is_active if s else False
+
+    def active_ingest(self, channel_id: str) -> str:
+        s = self._streams.get(channel_id)
+        return s.active_ingest if s else "primary"
 
     def play_channel(self, channel: Channel) -> None:
         if not channel.playlist:

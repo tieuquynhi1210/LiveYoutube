@@ -183,8 +183,13 @@ class MainWindow(QMainWindow):
         self.name_edit.textEdited.connect(self._on_name_edited)
         self.key_edit = QLineEdit()
         self.key_edit.textEdited.connect(self._on_key_edited)
+        self.ingest_combo = QComboBox()
+        self.ingest_combo.addItem("Chính (a.rtmp)", "primary")
+        self.ingest_combo.addItem("Dự phòng (b.rtmp)", "backup")
+        self.ingest_combo.currentIndexChanged.connect(self._on_ingest_changed)
         form.addRow("Tên:", self.name_edit)
         form.addRow("Stream key:", self.key_edit)
+        form.addRow("Ingest ưu tiên:", self.ingest_combo)
         v.addWidget(info)
 
         # Playlist riêng
@@ -226,6 +231,8 @@ class MainWindow(QMainWindow):
         self.stat_fps = self._stat(g, 1, 0, "FPS:")
         self.stat_bitrate = self._stat(g, 1, 2, "Bitrate:")
         self.stat_speed = self._stat(g, 2, 0, "Tốc độ:")
+        self.stat_drop = self._stat(g, 2, 2, "Frame rớt:")
+        self.stat_ingest = self._stat(g, 3, 0, "Ingest đang dùng:")
         btns = QHBoxLayout()
         self.play_btn = QPushButton("▶  Phát")
         self.play_btn.setStyleSheet("font-weight:bold; padding:8px;")
@@ -237,7 +244,7 @@ class MainWindow(QMainWindow):
         btns.addWidget(self.play_btn)
         btns.addWidget(self.pause_btn)
         btns.addWidget(self.stop_btn)
-        g.addLayout(btns, 3, 0, 1, 4)
+        g.addLayout(btns, 4, 0, 1, 4)
         v.addWidget(ctl)
         return w
 
@@ -359,7 +366,7 @@ class MainWindow(QMainWindow):
     def _load_detail(self) -> None:
         ch = self._current_channel()
         has = ch is not None
-        for wdg in (self.name_edit, self.key_edit, self.playlist_widget,
+        for wdg in (self.name_edit, self.key_edit, self.ingest_combo, self.playlist_widget,
                     self.play_btn, self.pause_btn, self.stop_btn):
             wdg.setEnabled(has)
         if not has:
@@ -372,9 +379,20 @@ class MainWindow(QMainWindow):
             return
         self.name_edit.setText(ch.name)
         self.key_edit.setText(ch.stream_key)
+        self.ingest_combo.setEnabled(True)
+        self.ingest_combo.blockSignals(True)
+        i = self.ingest_combo.findData(ch.ingest)
+        self.ingest_combo.setCurrentIndex(i if i >= 0 else 0)
+        self.ingest_combo.blockSignals(False)
         self._reload_playlist_widget()
         self._reset_stats()
         self._update_detail_controls()
+
+    def _on_ingest_changed(self, *args) -> None:
+        ch = self._current_channel()
+        if ch:
+            ch.ingest = self.ingest_combo.currentData()
+            self._save_config()
 
     def _reload_playlist_widget(self) -> None:
         ch = self._current_channel()
@@ -497,6 +515,8 @@ class MainWindow(QMainWindow):
         label = RELAY_STATE_LABEL.get(st, "—")
         self.stat_state.setText(label)
         self.stat_state.setStyleSheet(f"font-weight:bold; color:{_STATE_COLOR.get(st, '#888')};")
+        ing = self.controller.active_ingest(ch.id)
+        self.stat_ingest.setText("Chính (a.rtmp)" if ing == "primary" else "Dự phòng (b.rtmp)")
         if st in (RelayState.STOPPED, RelayState.ERROR):
             self.progress_bar.setValue(0)
             self.progress_label.setText("—")
@@ -508,7 +528,10 @@ class MainWindow(QMainWindow):
         self.stat_uptime.setText(_fmt(s.out_time_sec))
         self.stat_fps.setText(f"{s.fps:.1f}")
         self.stat_bitrate.setText(f"{s.bitrate_kbps / 1000:.1f} Mbps")
-        self.stat_speed.setText(f"{s.speed:.2f}×" + ("  ⚠" if 0 < s.speed < 0.95 else ""))
+        self.stat_speed.setText(f"{s.speed:.2f}×" + ("  ⚠ chậm hơn realtime" if 0 < s.speed < 0.95 else ""))
+        rate = s.drop_rate
+        self.stat_drop.setText(f"{s.dropped_frames} ({rate:.1f}%)")
+        self.stat_drop.setStyleSheet("font-weight:bold; color:%s;" % ("#e74c3c" if rate >= 1.0 else "inherit"))
 
     def _on_channel_progress(self, cid: str, pos: float, total: float,
                              clip_idx: int, clip_count: int) -> None:
@@ -524,8 +547,10 @@ class MainWindow(QMainWindow):
         if not keep_state:
             self.stat_state.setText("—")
             self.stat_state.setStyleSheet("font-weight:bold;")
-        for lbl in (self.stat_uptime, self.stat_fps, self.stat_bitrate, self.stat_speed):
+        for lbl in (self.stat_uptime, self.stat_fps, self.stat_bitrate, self.stat_speed,
+                    self.stat_drop, self.stat_ingest):
             lbl.setText("—")
+        self.stat_drop.setStyleSheet("font-weight:bold;")
 
     def _on_error(self, msg: str) -> None:
         self._append_log(f"❌ {msg}")
