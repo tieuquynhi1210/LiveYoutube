@@ -161,12 +161,14 @@ def _encoder_input_filter(cfg: StreamConfig) -> list[str]:
     infos = [playlist_manager.probe(p) for p in paths]
     vf = _video_filter(preset.width, preset.height, preset.fps)
 
+    # KHÔNG dùng -re trên từng input (gây kẹt nhịp ở điểm chuyển clip). Thay
+    # vào đó pace output bằng bộ lọc realtime/arealtime — cách chuẩn cho filtergraph.
     args: list[str] = [
         ffmpeg_path(), "-hide_banner", "-loglevel", "warning",
         "-progress", "pipe:1", "-nostats",
     ]
     for p in paths:
-        args += ["-re", "-i", p]
+        args += ["-i", p]
 
     silent_input_of: dict[int, int] = {}
     next_index = len(paths)
@@ -180,14 +182,17 @@ def _encoder_input_filter(cfg: StreamConfig) -> list[str]:
     parts: list[str] = []
     concat_in = ""
     for i, info in enumerate(infos):
-        parts.append(f"[{i}:v]{vf}[v{i}]")
+        # :v:0 lấy luồng video thật (bỏ qua ảnh bìa nhúng nếu có).
+        parts.append(f"[{i}:v:0]{vf}[v{i}]")
         a_src = i if info.has_audio else silent_input_of[i]
         parts.append(
             f"[{a_src}:a]aresample=48000,"
             f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"
         )
         concat_in += f"[v{i}][a{i}]"
-    parts.append(f"{concat_in}concat=n={len(paths)}:v=1:a=1[vout][aout]")
+    parts.append(f"{concat_in}concat=n={len(paths)}:v=1:a=1[vc][ac]")
+    parts.append("[vc]realtime[vout]")   # pace video về đúng tốc độ thật
+    parts.append("[ac]arealtime[aout]")  # pace audio tương ứng
 
     args += ["-filter_complex", ";".join(parts)]
     return args

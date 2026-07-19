@@ -325,10 +325,24 @@ class StreamController(QObject):
             return
         r = _Relay(channel, self._m3u8, self)
         r.changed.connect(self.channel_changed)
+        r.changed.connect(self._log_relay_change)
         r.log.connect(self.log_line)
         self._relays[channel.id] = r
         if autostart:
             r.start()
+
+    def _log_relay_change(self, channel_id: str, state: RelayState, message: str) -> None:
+        name = channel_id
+        r = self._relays.get(channel_id)
+        if r is not None:
+            name = r.channel.name or channel_id
+        elif self._cfg is not None:
+            ch = next((c for c in self._cfg.channels if c.id == channel_id), None)
+            if ch is not None:
+                name = ch.name or channel_id
+        label = RELAY_STATE_LABEL.get(state, str(state))
+        extra = f" ({message})" if message else ""
+        self.log_line.emit(f"Kênh '{name}': {label}{extra}")
 
     # ---------------------------------------------------------- encoder mgmt
     def _launch_encoder(self) -> None:
